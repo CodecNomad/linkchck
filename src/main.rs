@@ -1,6 +1,7 @@
 use dashmap::DashSet;
 use futures::future::join_all;
-use regex::Regex;
+use linkify::LinkFinder;
+use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, USER_AGENT};
 use std::{
     env,
     sync::{Arc, LazyLock},
@@ -9,7 +10,47 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Semaphore;
 use tracing::{Level, error, info, instrument, trace, warn};
 
-static REQWEST_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
+static REQWEST_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    let mut headers = HeaderMap::new();
+
+    headers.insert(
+        USER_AGENT,
+        HeaderValue::from_static(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+        ),
+    );
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static(
+            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        ),
+    );
+    headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
+
+    headers.insert(
+        "sec-ch-ua",
+        HeaderValue::from_static(
+            "\"Chromium\";v=\"128\", \"Not;A=Brand\";v=\"24\", \"Google Chrome\";v=\"128\"",
+        ),
+    );
+    headers.insert("sec-ch-ua-mobile", HeaderValue::from_static("?0"));
+    headers.insert(
+        "sec-ch-ua-platform",
+        HeaderValue::from_static("\"Windows\""),
+    );
+    headers.insert("sec-fetch-dest", HeaderValue::from_static("document"));
+    headers.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
+    headers.insert("sec-fetch-site", HeaderValue::from_static("none"));
+    headers.insert("sec-fetch-user", HeaderValue::from_static("?1"));
+    headers.insert("upgrade-insecure-requests", HeaderValue::from_static("1"));
+
+    reqwest::Client::builder()
+        .default_headers(headers)
+        .timeout(std::time::Duration::from_secs(5))
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .build()
+        .expect("Failed to build reqwest client")
+});
 
 static CONCURRENT_REQUEST_SEMAPHORE: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(env!("CONCURRENT_REQUEST_LIMIT").parse().unwrap()));
@@ -17,12 +58,7 @@ static CONCURRENT_REQUEST_SEMAPHORE: LazyLock<Semaphore> =
 static ALREADY_CHECKED: LazyLock<Arc<DashSet<String>>> =
     LazyLock::new(|| Arc::new(DashSet::<String>::new()));
 
-static REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(
-        r"https?:\/\/(www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_+.~#?&/=]*)",
-    )
-    .expect("This shall not be a problem")
-});
+static LINK_FINDER: LazyLock<LinkFinder> = LazyLock::new(LinkFinder::new);
 
 #[instrument(level = "trace")]
 async fn check_url(url: String) {
@@ -34,16 +70,35 @@ async fn check_url(url: String) {
     info!("Checking url: {}", url);
 
     let _permit = CONCURRENT_REQUEST_SEMAPHORE.acquire().await.unwrap();
-    if REQWEST_CLIENT.head(&url).send().await.is_err() {
+    let head_request = REQWEST_CLIENT.head(&url).send().await;
+
+    let dead_link = || {
         warn!("Found dead link: {}", url);
-        println!("{}", url);
+        println!("{}", url)
     };
+
+    if let Ok(res) = head_request {
+        if res.status().is_success() {
+            return;
+        }
+
+        if REQWEST_CLIENT
+            .get(&url)
+            .send()
+            .await
+            .is_ok_and(|resp| resp.status().is_success())
+        {
+            return;
+        };
+    }
+
+    dead_link();
 }
 
 #[instrument(level = "trace")]
 async fn match_line(line: String) {
     trace!("Matching urls");
-    let task_futures = REGEX.find_iter(&line).map(|url_match| {
+    let task_futures = LINK_FINDER.links(&line).map(|url_match| {
         let owned_url = url_match.as_str().to_string();
 
         tokio::spawn(check_url(owned_url))
