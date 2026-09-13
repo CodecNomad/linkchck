@@ -2,6 +2,11 @@
 name = "linkchck"
 version = "0.1.0"
 edition = "2024"
+description = "A blazing-fast, asynchronous file link checker written in Rust."
+license = "MIT"
+repository = "https://github.com/CodecNomad/linkchck"
+keywords = ["link-checker", "url-checker", "async", "cli"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 dashmap = "6.2.1"
