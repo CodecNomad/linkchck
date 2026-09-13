@@ -2,10 +2,10 @@ use dashmap::DashSet;
 use futures::future::join_all;
 use regex::Regex;
 use std::{
-    env, fs,
-    io::{BufRead, BufReader},
+    env,
     sync::{Arc, LazyLock},
 };
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Semaphore;
 use tracing::{Level, error, info, instrument, trace, warn};
 
@@ -19,7 +19,7 @@ static ALREADY_CHECKED: LazyLock<Arc<DashSet<String>>> =
 
 static REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?:http[s]?:\/\/.)?(?:www\.)?[-a-zA-Z0-9@%._\+~#=]{2,256}\.[a-z]{2,6}\b(?:[-a-zA-Z0-9@:%_\+.~#?&\/\/=]*)",
+        r"https?:\/\/(www\.)?[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b([-a-zA-Z0-9()@:%_+.~#?&/=]*)",
     )
     .expect("This shall not be a problem")
 });
@@ -41,16 +41,7 @@ async fn check_url(url: String) {
 }
 
 #[instrument(level = "trace")]
-async fn check_line(result_line: std::result::Result<std::string::String, std::io::Error>) {
-    trace!("Checking line");
-    let line = match result_line {
-        Ok(line) => line,
-        Err(err) => {
-            error!(?err, "Unable to read line");
-            return;
-        }
-    };
-
+async fn match_line(line: String) {
     trace!("Matching urls");
     let task_futures = REGEX.find_iter(&line).map(|url_match| {
         let owned_url = url_match.as_str().to_string();
@@ -66,7 +57,7 @@ async fn read_file(file_path: String) {
     info!("Reading from file: {}", file_path);
 
     trace!("Opening file_handle");
-    let file_handle = match fs::File::open(&file_path) {
+    let file_handle = match tokio::fs::File::open(&file_path).await {
         Ok(handle) => handle,
         Err(err) => {
             error!(?err, "Unable to open handle");
@@ -75,10 +66,22 @@ async fn read_file(file_path: String) {
     };
 
     trace!("Reading lines");
-    let buf_reader = BufReader::new(file_handle);
-    let future_tasks = buf_reader
-        .lines()
-        .map(|line| tokio::spawn(check_line(line)));
+    let mut lines = BufReader::new(file_handle).lines();
+    let mut future_tasks = Vec::new();
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                future_tasks.push(tokio::spawn(match_line(line)));
+            }
+            Ok(None) => {
+                break;
+            }
+            Err(err) => {
+                error!(?err, "Unable to read line");
+                break;
+            }
+        }
+    }
 
     join_all(future_tasks).await;
 }
