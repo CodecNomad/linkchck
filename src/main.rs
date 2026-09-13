@@ -134,8 +134,14 @@ async fn main() {
         .with_target(false)
         .init();
 
+    let file_paths = env::args().skip(1);
+    if file_paths.len() < 1 {
+        error!("No file paths were given in arguments");
+        return info!("Usage: linkchck arg1 arg2 ...");
+    }
+
     let mut future_tasks = JoinSet::new();
-    env::args().skip(1).for_each(|file| {
+    file_paths.for_each(|file| {
         future_tasks.spawn(read_file(file));
     });
 
