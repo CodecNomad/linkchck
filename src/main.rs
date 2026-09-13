@@ -1,13 +1,13 @@
 use dashmap::DashSet;
-use futures::future::join_all;
 use linkify::LinkFinder;
 use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, USER_AGENT};
-use std::{
-    env,
-    sync::{Arc, LazyLock},
-};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use std::{env, sync::LazyLock};
+use tokio::fs;
 use tokio::sync::Semaphore;
+use tokio::{
+    io::{AsyncBufReadExt, BufReader},
+    task::JoinSet,
+};
 use tracing::{Level, error, info, instrument, trace, warn};
 
 static REQWEST_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
@@ -55,8 +55,7 @@ static REQWEST_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 static CONCURRENT_REQUEST_SEMAPHORE: LazyLock<Semaphore> =
     LazyLock::new(|| Semaphore::new(env!("CONCURRENT_REQUEST_LIMIT").parse().unwrap()));
 
-static ALREADY_CHECKED: LazyLock<Arc<DashSet<String>>> =
-    LazyLock::new(|| Arc::new(DashSet::<String>::new()));
+static ALREADY_CHECKED: LazyLock<DashSet<String>> = LazyLock::new(DashSet::<String>::new);
 
 static LINK_FINDER: LazyLock<LinkFinder> = LazyLock::new(LinkFinder::new);
 
@@ -96,23 +95,11 @@ async fn check_url(url: String) {
 }
 
 #[instrument(level = "trace")]
-async fn match_line(line: String) {
-    trace!("Matching urls");
-    let task_futures = LINK_FINDER.links(&line).map(|url_match| {
-        let owned_url = url_match.as_str().to_string();
-
-        tokio::spawn(check_url(owned_url))
-    });
-
-    join_all(task_futures).await;
-}
-
-#[instrument(level = "trace")]
 async fn read_file(file_path: String) {
     info!("Reading from file: {}", file_path);
 
     trace!("Opening file_handle");
-    let file_handle = match tokio::fs::File::open(&file_path).await {
+    let file_handle = match fs::File::open(&file_path).await {
         Ok(handle) => handle,
         Err(err) => {
             error!(?err, "Unable to open handle");
@@ -122,23 +109,16 @@ async fn read_file(file_path: String) {
 
     trace!("Reading lines");
     let mut lines = BufReader::new(file_handle).lines();
-    let mut future_tasks = Vec::new();
-    loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => {
-                future_tasks.push(tokio::spawn(match_line(line)));
-            }
-            Ok(None) => {
-                break;
-            }
-            Err(err) => {
-                error!(?err, "Unable to read line");
-                break;
-            }
+    let mut future_tasks = JoinSet::new();
+    while let Ok(Some(line)) = lines.next_line().await {
+        for url_match in LINK_FINDER.links(&line) {
+            let owned_url = url_match.as_str().to_string();
+
+            future_tasks.spawn(check_url(owned_url));
         }
     }
 
-    join_all(future_tasks).await;
+    future_tasks.join_all().await;
 }
 
 #[tokio::main]
@@ -154,9 +134,10 @@ async fn main() {
         .with_target(false)
         .init();
 
-    let future_tasks = env::args()
-        .skip(1)
-        .map(|file| tokio::spawn(read_file(file)));
+    let mut future_tasks = JoinSet::new();
+    env::args().skip(1).for_each(|file| {
+        future_tasks.spawn(read_file(file));
+    });
 
-    join_all(future_tasks).await;
+    future_tasks.join_all().await;
 }
