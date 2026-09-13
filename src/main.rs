@@ -6,7 +6,16 @@ use std::{
     io::{BufRead, BufReader},
     sync::{Arc, LazyLock},
 };
+use tokio::sync::Semaphore;
 use tracing::{Level, error, info, instrument, trace, warn};
+
+static REQWEST_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
+
+static CONCURRENT_REQUEST_SEMAPHORE: LazyLock<Semaphore> =
+    LazyLock::new(|| Semaphore::new(env!("CONCURRENT_REQUEST_LIMIT").parse().unwrap()));
+
+static ALREADY_CHECKED: LazyLock<Arc<DashSet<String>>> =
+    LazyLock::new(|| Arc::new(DashSet::<String>::new()));
 
 static REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -14,11 +23,6 @@ static REGEX: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("This shall not be a problem")
 });
-
-static REQWEST_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
-
-static ALREADY_CHECKED: LazyLock<Arc<DashSet<String>>> =
-    LazyLock::new(|| Arc::new(DashSet::<String>::new()));
 
 #[instrument(level = "trace")]
 async fn check_url(url: String) {
@@ -29,6 +33,7 @@ async fn check_url(url: String) {
     };
     info!("Checking url: {}", url);
 
+    let _permit = CONCURRENT_REQUEST_SEMAPHORE.acquire().await.unwrap();
     if REQWEST_CLIENT.head(&url).send().await.is_err() {
         warn!("Found dead link: {}", url);
         println!("{}", url);

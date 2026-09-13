@@ -7,19 +7,14 @@
 Run it with one or more files as arguments:
 
 ```bash
-cargo run -- test.md > output.log 2> tracing.log
+cargo run --release -- test.md > output.log
 ```
 
 - `output.log` will contain links that failed checks.
-- `tracing.log` will contain tracing/log output.
+- Log level is set to `info` for release versions, for debug it's set to `trace`
 
 ## Current limitations
+- There is no single domain rate limiting, so if your file had the same domain with different paths 100k times, you'd spam it.
 
-- There is no rate limiting yet.
-- Do not use it on files with many links to the same domain, or it may send too many requests in too short a time.
-- It may also fail when too many different domains are requested at the same time.
-
-## TODO
-
-- [ ] Add request rate limiting (especially per domain).
-- [ ] Add concurrency controls/backpressure for large multi-domain workloads.
+## Compile-time flags in "build.rs"
+- `CONCURRENT_REQUEST_LIMIT` will allow you to change the limit of concurrent outgoing requests, default value is `100`
