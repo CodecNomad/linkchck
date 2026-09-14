@@ -1,3 +1,10 @@
+#[cfg(not(target_env = "msvc"))]
+use tikv_jemallocator::Jemalloc;
+
+#[cfg(not(target_env = "msvc"))]
+#[global_allocator]
+static GLOBAL: Jemalloc = Jemalloc;
+
 use dashmap::DashSet;
 use linkify::LinkFinder;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -45,7 +52,6 @@ static REQWEST_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 
     reqwest::Client::builder()
         .default_headers(headers)
-        .timeout(std::time::Duration::from_secs(5))
         .redirect(reqwest::redirect::Policy::limited(3))
         .build()
         .expect("Failed to build reqwest client")
@@ -65,10 +71,11 @@ async fn check_url(url: String) {
     };
     info!("Checking url: {}", url);
 
-    let _permit = CONCURRENT_REQUEST_SEMAPHORE.acquire().await.unwrap();
+    let permit = CONCURRENT_REQUEST_SEMAPHORE.acquire().await.unwrap();
     let head_request = REQWEST_CLIENT.head(&url).send().await;
 
     let dead_link = || {
+        drop(permit);
         warn!("Found dead link: {}", url);
         println!("{}", url)
     };
