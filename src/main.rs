@@ -1,6 +1,7 @@
 use dashmap::DashSet;
 use linkify::LinkFinder;
-use reqwest::header::{ACCEPT, ACCEPT_LANGUAGE, HeaderMap, HeaderValue, USER_AGENT};
+use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+use std::str::FromStr;
 use std::{env, sync::LazyLock};
 use tokio::fs;
 use tokio::sync::Semaphore;
@@ -8,46 +9,44 @@ use tokio::{
     io::{AsyncBufReadExt, BufReader},
     task::JoinSet,
 };
-use tracing::{Level, error, info, instrument, trace, warn};
+use tracing::{Level, error, info, warn};
+
+const SPOOFED_HEADERS: [(&str, &str); 11] = [
+    (
+        "user-agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+    ),
+    (
+        "accept",
+        "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    ),
+    ("accept-language", "en-US,en;q=0.9"),
+    (
+        "sec-ch-ua",
+        "\"Chromium\";v=\"128\", \"Not;A=Brand\";v=\"24\", \"Google Chrome\";v=\"128\"",
+    ),
+    ("sec-ch-ua-mobile", "?0"),
+    ("sec-ch-ua-platform", "\"Windows\""),
+    ("sec-fetch-dest", "document"),
+    ("sec-fetch-mode", "navigate"),
+    ("sec-fetch-site", "none"),
+    ("sec-fetch-user", "?1"),
+    ("upgrade-insecure-requests", "1"),
+];
 
 static REQWEST_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
-    let mut headers = HeaderMap::new();
-
-    headers.insert(
-        USER_AGENT,
-        HeaderValue::from_static(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
-        ),
-    );
-    headers.insert(
-        ACCEPT,
-        HeaderValue::from_static(
-            "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        ),
-    );
-    headers.insert(ACCEPT_LANGUAGE, HeaderValue::from_static("en-US,en;q=0.9"));
-
-    headers.insert(
-        "sec-ch-ua",
-        HeaderValue::from_static(
-            "\"Chromium\";v=\"128\", \"Not;A=Brand\";v=\"24\", \"Google Chrome\";v=\"128\"",
-        ),
-    );
-    headers.insert("sec-ch-ua-mobile", HeaderValue::from_static("?0"));
-    headers.insert(
-        "sec-ch-ua-platform",
-        HeaderValue::from_static("\"Windows\""),
-    );
-    headers.insert("sec-fetch-dest", HeaderValue::from_static("document"));
-    headers.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
-    headers.insert("sec-fetch-site", HeaderValue::from_static("none"));
-    headers.insert("sec-fetch-user", HeaderValue::from_static("?1"));
-    headers.insert("upgrade-insecure-requests", HeaderValue::from_static("1"));
+    let mut headers = HeaderMap::with_capacity(SPOOFED_HEADERS.len());
+    for (name, value) in SPOOFED_HEADERS {
+        headers.insert(
+            HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        );
+    }
 
     reqwest::Client::builder()
         .default_headers(headers)
         .timeout(std::time::Duration::from_secs(5))
-        .redirect(reqwest::redirect::Policy::limited(10))
+        .redirect(reqwest::redirect::Policy::limited(3))
         .build()
         .expect("Failed to build reqwest client")
 });
@@ -59,9 +58,7 @@ static ALREADY_CHECKED: LazyLock<DashSet<String>> = LazyLock::new(DashSet::<Stri
 
 static LINK_FINDER: LazyLock<LinkFinder> = LazyLock::new(LinkFinder::new);
 
-#[instrument(level = "trace")]
 async fn check_url(url: String) {
-    trace!("Checking url");
     if !ALREADY_CHECKED.insert(url.clone()) {
         info!("Skipping duplicate url, already being checked: {}", url);
         return;
@@ -94,11 +91,9 @@ async fn check_url(url: String) {
     dead_link();
 }
 
-#[instrument(level = "trace")]
 async fn read_file(file_path: String) {
     info!("Reading from file: {}", file_path);
 
-    trace!("Opening file_handle");
     let file_handle = match fs::File::open(&file_path).await {
         Ok(handle) => handle,
         Err(err) => {
@@ -107,7 +102,6 @@ async fn read_file(file_path: String) {
         }
     };
 
-    trace!("Reading lines");
     let mut lines = BufReader::new(file_handle).lines();
     let mut future_tasks = JoinSet::new();
     while let Ok(Some(line)) = lines.next_line().await {
@@ -124,14 +118,7 @@ async fn read_file(file_path: String) {
 #[tokio::main]
 async fn main() {
     tracing_subscriber::fmt()
-        .with_max_level(if cfg!(debug_assertions) {
-            Level::TRACE
-        } else {
-            Level::INFO
-        })
-        .with_writer(std::io::stderr)
-        .with_ansi(true)
-        .with_target(false)
+        .with_max_level(Level::from_str(env!("TRACE_LEVEL")).unwrap())
         .init();
 
     let file_paths = env::args().skip(1);
