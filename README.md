@@ -12,7 +12,7 @@ cargo run --release -- /path/to/file.md /path/to/another.txt > dead-links.txt
 
 - Failed URLs are printed to `stdout` (so they can be redirected to a file).
 - Logs are written to `stderr`.
-- Log level is `trace` in debug builds and `info` in release builds.
+- Log level is set to `info` via `TRACE_LEVEL`.
 
 ## How it works
 
@@ -28,11 +28,14 @@ cargo run --release -- /path/to/file.md /path/to/another.txt > dead-links.txt
 .
 ├── src/
 │   └── main.rs   # CLI entrypoint and link-checking logic
-├── build.rs      # sets compile-time CONCURRENT_REQUEST_LIMIT
+├── build.rs      # sets compile-time CONCURRENT_REQUEST_LIMIT and TRACE_LEVEL
 ├── test.md       # sample input file
 └── Cargo.toml    # package metadata and dependencies
 ```
 
 ## Compile-time configuration
 
-`build.rs` sets `CONCURRENT_REQUEST_LIMIT` to `100` by default, which is used to cap concurrent HTTP requests.
+`build.rs` sets:
+
+- `CONCURRENT_REQUEST_LIMIT=100` to cap concurrent HTTP requests.
+- `TRACE_LEVEL=INFO` for tracing output verbosity.
